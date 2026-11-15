@@ -1,0 +1,40 @@
+# Example Hermes Configuration Snippet for `custom-gateway-hub`
+# Copy relevant sections into `$HERMES_HOME/config.yaml` and store your real API key
+# in `$HERMES_HOME/.env` as `HERMES_CUSTOM_CUSTOM_GATEWAY_API_KEY=sk-...`
+
+model:
+  provider: custom:custom-gateway
+  default: gpt-6.1-sol
+  base_url: https://your-gateway.example.com/v1
+  key_env: HERMES_CUSTOM_CUSTOM_GATEWAY_API_KEY
+  api_mode: chat_completions
+
+providers:
+  custom-gateway:
+    name: Custom Gateway
+    base_url: https://your-gateway.example.com/v1
+    key_env: HERMES_CUSTOM_CUSTOM_GATEWAY_API_KEY
+    api_mode: chat_completions
+    discover_models: true
+    model: gpt-6.1-sol
+
+image_gen:
+  provider: custom-gateway
+  model: gpt-image-2.5-sunburst
+  custom_gateway:
+    provider: custom-gateway
+    base_url: https://your-gateway.example.com/v1
+    key_env: HERMES_CUSTOM_CUSTOM_GATEWAY_API_KEY
+    model: gpt-image-2.5-sunburst
+  openai:
+    provider: custom-gateway
+    base_url: https://your-gateway.example.com/v1
+    key_env: HERMES_CUSTOM_CUSTOM_GATEWAY_API_KEY
+    model: gpt-image-2.5-sunburst
+
+plugins:
+  enabled:
+    - custom-gateway-hub
+
+agent:
+  environment_hint: 'IMPORTANT PROXY RULE: Do NOT invoke any built-in/hosted server-side image_generation tool (it returns HTTP 502 on some custom gateways). Whenever you need to generate or edit an image, ALWAYS call the `image_generate` function tool or an explicit project script instead.'

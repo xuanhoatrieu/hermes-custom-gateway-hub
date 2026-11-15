@@ -1,0 +1,7 @@
+{
+  "name": "custom-gateway-hub",
+  "label": "Custom Gateway Hub",
+  "description": "Kiểm tra kết nối Custom Endpoint, tự động tải model mới và chọn Model Sinh Nội Dung / Model Tạo Ảnh.",
+  "version": "1.0.0",
+  "api": "plugin_api.py"
+}
