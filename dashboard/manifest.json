@@ -1,0 +1,7 @@
+{
+  "name": "custom-gateway-hub",
+  "label": "Custom Gateway Hub",
+  "description": "Thiết lập nhanh Custom Endpoint & API Key trên máy mới, kiểm tra kết nối (/v1/models), tự động tải model mới và chọn riêng Model Sinh Nội Dung / Model Tạo Ảnh.",
+  "version": "1.1.0",
+  "api": "plugin_api.py"
+}

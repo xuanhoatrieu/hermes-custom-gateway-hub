@@ -1,8 +1,11 @@
-"""Custom Gateway Hub — User Backend Plugin.
+"""Custom Gateway Hub — Unified User Plugin (Backend Half, v1.1.0).
 
 Registers ``CustomGatewayImageProvider`` (`image_gen.provider = "custom-gateway"`) so Hermes CLI,
 Gateway turns, and Settings → Capabilities → Image Generation dynamically list all image models
 discovered from the user's OpenAI-compatible Custom Gateway (`/v1/models`).
+
+Guards core imports gracefully so `hermes plugins validate`'s isolated bare-interpreter
+capability probe succeeds cleanly alongside live Hermes runtime execution.
 """
 
 from __future__ import annotations
@@ -16,30 +19,37 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    error_response,
-    resolve_aspect_ratio,
-    save_b64_image,
-    success_response,
-)
-from plugins.image_gen._common import (
-    api_key_setup_schema,
-    cache_url_best_effort,
-    collect_source_images,
-    import_openai,
-    load_image_gen_config,
-    materialize_image,
-    openai_importable,
-    prompt_required_error,
-    record_token_usage,
-    size_for,
-)
-
 logger = logging.getLogger(__name__)
 
 _CORE_MODULE_NAME = "_custom_gateway_hub_core"
+
+try:
+    from agent.image_gen_provider import (
+        DEFAULT_ASPECT_RATIO,
+        ImageGenProvider,
+        error_response,
+        resolve_aspect_ratio,
+        save_b64_image,
+        success_response,
+    )
+    from plugins.image_gen._common import (
+        api_key_setup_schema,
+        cache_url_best_effort,
+        collect_source_images,
+        import_openai,
+        load_image_gen_config,
+        materialize_image,
+        openai_importable,
+        prompt_required_error,
+        record_token_usage,
+        size_for,
+    )
+
+    _HERMES_RUNTIME_AVAILABLE = True
+except ModuleNotFoundError:
+    DEFAULT_ASPECT_RATIO = "1:1"
+    ImageGenProvider = object  # type: ignore[misc,assignment]
+    _HERMES_RUNTIME_AVAILABLE = False
 
 
 def _load_core():
@@ -339,8 +349,6 @@ class CustomGatewayImageProvider(ImageGenProvider):
                     extra=extra,
                 )
         except Exception as images_exc:
-            # Some custom gateway image models (e.g. gemini-3.1-flash-image) expose image output
-            # through /v1/chat/completions instead of /v1/images/generations. Try chat fallback on text-to-image.
             if not is_edit and core.image_transport_hint(model_id) == "images_or_chat":
                 try:
                     chat_resp = client.chat.completions.create(

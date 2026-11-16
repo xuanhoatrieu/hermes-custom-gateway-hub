@@ -1,7 +1,0 @@
-name: custom-gateway-hub
-version: 1.0.0
-kind: backend
-description: "Custom Gateway Model Hub — live /v1/models connection check, automatic Chat vs Image model discovery, and dynamic Custom Gateway Image Generation provider."
-author: "Hermes User Plugin"
-config_keys:
-  - image_gen.custom_gateway

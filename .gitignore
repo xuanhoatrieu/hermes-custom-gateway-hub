@@ -1,25 +1,12 @@
-# ============================================================================
-# Strict Allowlist .gitignore for Hermes User Plugin Repository
-# Blocks ALL local secrets, databases, caches, logs, and upstream hermes-agent
-# by default, and tracks ONLY the update-safe `custom-gateway-hub` plugin files.
-# ============================================================================
-/*
+# Python bytecode & test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
 
-# Track repository root docs & installer
-!/.gitignore
-!/README.md
-!/config.example.yaml
-!/install.ps1
-
-# Track Backend Python User Plugin (`plugins/custom-gateway-hub/`)
-!/plugins/
-/plugins/*
-!/plugins/custom-gateway-hub/
-/plugins/custom-gateway-hub/**/__pycache__/
-/plugins/custom-gateway-hub/**/*.pyc
-/plugins/custom-gateway-hub/**/*.pyo
-
-# Track Desktop Runtime UI Plugin (`desktop-plugins/custom-gateway-hub/`)
-!/desktop-plugins/
-/desktop-plugins/*
-!/desktop-plugins/custom-gateway-hub/
+# Local secrets & OS metadata
+.env
+.env.*
+.DS_Store
+Thumbs.db

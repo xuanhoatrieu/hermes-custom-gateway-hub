@@ -1,13 +1,14 @@
-"""Core configuration, secret resolution, /v1/models probing, and model partitioning
-for the user-space ``custom-gateway-hub`` plugin.
+"""Core configuration, zero-touch fresh-PC bootstrap, secret resolution, `/v1/models` probing,
+and Chat vs Image model partitioning for the unified ``custom-gateway-hub`` plugin (v1.1.0).
 
-Lives entirely inside ``$HERMES_HOME/plugins/custom-gateway-hub/`` so ``hermes update``
-never touches or conflicts with these files.
+Lives inside ``$HERMES_HOME/plugins/custom-gateway-hub/`` so ``hermes update`` never overwrites
+or conflicts with these files.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import os
 import re
@@ -18,6 +19,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+PLUGIN_ID = "custom-gateway-hub"
+PLUGIN_VERSION = "1.1.0"
 DEFAULT_PROVIDER_SLUG = "custom-gateway"
 DEFAULT_API_MODE = "chat_completions"
 DEFAULT_IMAGE_MODELS = (
@@ -27,6 +30,12 @@ DEFAULT_IMAGE_MODELS = (
     "gpt-image-2",
     "gpt-image-1.5",
     "gemini-3.1-flash-image",
+)
+
+DEFAULT_PROXY_IMAGE_HINT = (
+    "IMPORTANT PROXY RULE: Do NOT invoke any built-in/hosted server-side image_generation tool "
+    "(it returns HTTP 502 on this custom gateway). Whenever you need to generate or edit an image, "
+    "ALWAYS call the `image_generate` function tool (configured with GPT Image) or an explicit project script instead."
 )
 
 _WRITE_LOCK = threading.RLock()
@@ -110,6 +119,12 @@ def _read_dotenv_map(env_path: Path) -> dict[str, str]:
 def _lookup_secret(var_name: str, dotenv_cache: Optional[dict[str, str]] = None) -> str:
     if not var_name:
         return ""
+    home = _hermes_home()
+    if dotenv_cache is None:
+        dotenv_cache = _read_dotenv_map(home / ".env")
+    dotenv_val = (dotenv_cache.get(var_name) or "").strip()
+    if dotenv_val:
+        return dotenv_val
     try:
         from agent.secret_scope import get_secret_str
 
@@ -118,12 +133,7 @@ def _lookup_secret(var_name: str, dotenv_cache: Optional[dict[str, str]] = None)
             return scoped
     except Exception:
         pass
-    env_val = (os.environ.get(var_name) or "").strip()
-    if env_val:
-        return env_val
-    if dotenv_cache is None:
-        dotenv_cache = _read_dotenv_map(_hermes_home() / ".env")
-    return (dotenv_cache.get(var_name) or "").strip()
+    return (os.environ.get(var_name) or "").strip()
 
 
 def mask_api_key(api_key: str) -> str:
@@ -219,6 +229,77 @@ def _save_config_dict(cfg: dict[str, Any]) -> None:
     from hermes_cli.config import save_config
 
     save_config(cfg)
+
+
+def _has_proxy_image_hint(cfg: dict[str, Any]) -> bool:
+    agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    hint = str(agent_cfg.get("environment_hint") or "").strip()
+    return "image_generate" in hint
+
+
+def _ensure_plugin_enabled_in_cfg(cfg: dict[str, Any]) -> None:
+    plugins_block = cfg.setdefault("plugins", {})
+    if not isinstance(plugins_block, dict):
+        plugins_block = {}
+        cfg["plugins"] = plugins_block
+    enabled_list = plugins_block.get("enabled")
+    if not isinstance(enabled_list, list):
+        enabled_list = []
+        plugins_block["enabled"] = enabled_list
+    if PLUGIN_ID not in enabled_list:
+        enabled_list.append(PLUGIN_ID)
+
+
+def _apply_proxy_image_hint_to_cfg(cfg: dict[str, Any], ensure_hint: Optional[bool]) -> None:
+    if ensure_hint is None:
+        return
+    agent_block = cfg.setdefault("agent", {})
+    if not isinstance(agent_block, dict):
+        agent_block = {}
+        cfg["agent"] = agent_block
+
+    existing = str(agent_block.get("environment_hint") or "").strip()
+    if ensure_hint:
+        if not existing:
+            agent_block["environment_hint"] = DEFAULT_PROXY_IMAGE_HINT
+        elif "image_generate" not in existing:
+            agent_block["environment_hint"] = f"{existing}\n\n{DEFAULT_PROXY_IMAGE_HINT}"
+    else:
+        if existing == DEFAULT_PROXY_IMAGE_HINT:
+            agent_block["environment_hint"] = ""
+        elif existing.endswith(DEFAULT_PROXY_IMAGE_HINT):
+            agent_block["environment_hint"] = existing[: -len(DEFAULT_PROXY_IMAGE_HINT)].rstrip()
+
+
+def _normalize_ui_preferences_visible_models(canonical_provider: str, chosen_content: str) -> None:
+    """Prevent stale `hermes.desktop.visible-models` entries (such as legacy `custom::*`)
+    from hiding newly discovered Custom Gateway models in the Desktop composer menu."""
+    prefs_path = _hermes_home() / "ui-preferences.json"
+    if not prefs_path.is_file():
+        return
+    try:
+        raw = json.loads(prefs_path.read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(raw, dict):
+            return
+        vis = raw.get("hermes.desktop.visible-models")
+        if not isinstance(vis, list):
+            return
+
+        str_items = [str(x) for x in vis if isinstance(x, str)]
+        changed = False
+        if str_items and all(item.startswith("custom::") for item in str_items):
+            raw.pop("hermes.desktop.visible-models", None)
+            changed = True
+        elif str_items and chosen_content:
+            expected_key = f"{canonical_provider}::{chosen_content}"
+            if expected_key not in str_items:
+                raw["hermes.desktop.visible-models"] = [*str_items, expected_key]
+                changed = True
+
+        if changed:
+            prefs_path.write_text(json.dumps(raw, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except Exception as exc:
+        logger.debug("Could not normalize ui-preferences.json: %s", exc)
 
 
 def _resolve_provider_slug(cfg: dict[str, Any]) -> str:
@@ -370,7 +451,11 @@ def list_configured_image_models(cfg: Optional[dict[str, Any]] = None) -> list[d
     if not ids:
         ids = list(DEFAULT_IMAGE_MODELS)
 
-    new_ids = set(cg_section.get("new_image_models") or []) if isinstance(cg_section.get("new_image_models"), list) else set()
+    new_ids = (
+        set(cg_section.get("new_image_models") or [])
+        if isinstance(cg_section.get("new_image_models"), list)
+        else set()
+    )
     rows: list[dict[str, Any]] = []
     for mid in ids:
         family = detect_model_family(mid, is_image=True)
@@ -382,7 +467,9 @@ def list_configured_image_models(cfg: Optional[dict[str, Any]] = None) -> list[d
             "owned_by": family,
             "speed": "Fast" if ("flare" in mid or "flash" in mid) else "Standard",
             "strengths": (
-                "Images API + Chat fallback" if hint == "images_or_chat" else "OpenAI-compatible /v1/images/generations"
+                "Images API + Chat fallback"
+                if hint == "images_or_chat"
+                else "OpenAI-compatible /v1/images/generations"
             ),
             "price": "gateway",
             "transport": hint,
@@ -395,23 +482,26 @@ def list_configured_chat_models(cfg: Optional[dict[str, Any]] = None) -> list[di
     """Return saved chat/content models under `providers.<slug>.models`."""
     cfg = cfg if isinstance(cfg, dict) else _load_config_dict()
     slug = _resolve_provider_slug(cfg)
+    canonical_provider = f"custom:{slug}"
     providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
     prov = providers.get(slug) if isinstance(providers.get(slug), dict) else {}
-    models_Field = prov.get("models")
+    models_field = prov.get("models")
     ids: list[str] = []
-    if isinstance(models_Field, dict):
-        for mid in models_Field.keys():
+    if isinstance(models_field, dict):
+        for mid in models_field.keys():
             s = str(mid).strip()
             if s and not is_image_model(s) and s not in ids:
                 ids.append(s)
-    elif isinstance(models_Field, list):
-        for mid in models_Field:
+    elif isinstance(models_field, list):
+        for mid in models_field:
             s = str(mid).strip()
             if s and not is_image_model(s) and s not in ids:
                 ids.append(s)
 
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
-    active_chat = str(model_cfg.get("default") or prov.get("model") or "").strip()
+    cur_provider = str(model_cfg.get("provider") or "").strip()
+    is_gateway_active = cur_provider in {canonical_provider, slug, "custom"}
+    active_chat = str((model_cfg.get("default") if is_gateway_active else "") or prov.get("model") or "").strip()
     if active_chat and not is_image_model(active_chat) and active_chat not in ids:
         ids.insert(0, active_chat)
 
@@ -441,9 +531,17 @@ def get_hub_state() -> dict[str, Any]:
     img_cfg = cfg.get("image_gen") if isinstance(cfg.get("image_gen"), dict) else {}
     cg_cfg = img_cfg.get("custom_gateway") if isinstance(img_cfg.get("custom_gateway"), dict) else {}
     openai_img_cfg = img_cfg.get("openai") if isinstance(img_cfg.get("openai"), dict) else {}
+    providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    prov_entry = providers.get(creds["provider_slug"]) if isinstance(providers.get(creds["provider_slug"]), dict) else {}
 
-    active_content_model = str(model_cfg.get("default") or "").strip()
-    active_content_provider = str(model_cfg.get("provider") or creds["canonical_provider"]).strip()
+    cur_provider = str(model_cfg.get("provider") or "").strip()
+    is_gateway_active = cur_provider in {creds["canonical_provider"], creds["provider_slug"], "custom"}
+    active_content_model = str(
+        (model_cfg.get("default") if is_gateway_active else "")
+        or prov_entry.get("model")
+        or ""
+    ).strip()
+    active_content_provider = cur_provider if is_gateway_active else creds["canonical_provider"]
 
     active_image_provider = str(img_cfg.get("provider") or "custom-gateway").strip()
     active_image_model = (
@@ -455,15 +553,20 @@ def get_hub_state() -> dict[str, Any]:
 
     chat_models = list_configured_chat_models(cfg)
     image_models = list_configured_image_models(cfg)
+    has_api_key = bool(creds["api_key"])
+    has_base_url = bool(creds["base_url"])
 
     return {
         "ok": True,
+        "version": PLUGIN_VERSION,
+        "needs_setup": not (has_base_url and has_api_key),
+        "proxy_image_hint_enabled": _has_proxy_image_hint(cfg),
         "provider_slug": creds["provider_slug"],
         "canonical_provider": creds["canonical_provider"],
         "base_url": creds["base_url"],
         "api_mode": creds["api_mode"],
         "key_env": creds["key_env"],
-        "has_api_key": bool(creds["api_key"]),
+        "has_api_key": has_api_key,
         "masked_api_key": mask_api_key(creds["api_key"]),
         "active_content_model": active_content_model,
         "active_content_provider": active_content_provider,
@@ -485,6 +588,27 @@ def _clear_hermes_model_caches() -> None:
         clear_provider_models_cache()
     except Exception as exc:
         logger.debug("clear_provider_models_cache skipped: %s", exc)
+
+
+def _persist_api_key(key_env: str, api_key: str) -> None:
+    clean = (api_key or "").strip()
+    if not clean or "..." in clean:
+        return
+    from hermes_cli.config import save_env_value
+
+    save_env_value(key_env, clean)
+    save_env_value("CUSTOM_IMAGE_API_KEY", clean)
+    os.environ[key_env] = clean
+    os.environ["CUSTOM_IMAGE_API_KEY"] = clean
+    try:
+        from hermes_cli.env_loader import load_hermes_dotenv
+        from agent.secret_scope import refresh_installed_secret_scope
+
+        home = _hermes_home()
+        load_hermes_dotenv(hermes_home=home)
+        refresh_installed_secret_scope(home)
+    except Exception as exc:
+        logger.debug("Live secret scope refresh skipped: %s", exc)
 
 
 def probe_gateway_models(
@@ -625,6 +749,11 @@ def probe_gateway_models(
             slug = _resolve_provider_slug(fresh_cfg)
             key_env = _key_env_for_slug(slug)
 
+            if api_key and api_key.strip() and "..." not in api_key.strip():
+                _persist_api_key(key_env, api_key.strip())
+
+            _ensure_plugin_enabled_in_cfg(fresh_cfg)
+
             providers = fresh_cfg.setdefault("providers", {})
             if not isinstance(providers, dict):
                 providers = {}
@@ -684,27 +813,6 @@ def probe_gateway_models(
     }
 
 
-def _persist_api_key(key_env: str, api_key: str) -> None:
-    clean = (api_key or "").strip()
-    if not clean or "..." in clean:
-        return
-    from hermes_cli.config import save_env_value
-
-    save_env_value(key_env, clean)
-    save_env_value("CUSTOM_IMAGE_API_KEY", clean)
-    os.environ[key_env] = clean
-    os.environ["CUSTOM_IMAGE_API_KEY"] = clean
-    try:
-        from hermes_cli.env_loader import load_hermes_dotenv
-        from agent.secret_scope import refresh_installed_secret_scope
-
-        home = _hermes_home()
-        load_hermes_dotenv(hermes_home=home)
-        refresh_installed_secret_scope(home)
-    except Exception as exc:
-        logger.debug("Live secret scope refresh skipped: %s", exc)
-
-
 def apply_hub_settings(
     *,
     content_model: Optional[str] = None,
@@ -713,8 +821,9 @@ def apply_hub_settings(
     api_mode: Optional[str] = None,
     api_key: Optional[str] = None,
     sync_ppt_master: bool = True,
+    ensure_proxy_image_hint: Optional[bool] = True,
 ) -> dict[str, Any]:
-    """Persist selected Content Model, Image Model, and optional Endpoint edits cleanly."""
+    """Persist selected Content Model, Image Model, Endpoint/API Key, and fresh-PC safeguards."""
     with _WRITE_LOCK:
         cfg = _load_config_dict()
         creds = resolve_gateway_credentials(
@@ -733,6 +842,10 @@ def apply_hub_settings(
         if api_key and api_key.strip() and "..." not in api_key.strip():
             _persist_api_key(key_env, api_key.strip())
             eff_api_key = api_key.strip()
+
+        # 0. Ensure plugin is enabled & optional Proxy HTTP 502 guard is configured
+        _ensure_plugin_enabled_in_cfg(cfg)
+        _apply_proxy_image_hint_to_cfg(cfg, ensure_proxy_image_hint)
 
         # 1. Update providers.<slug>
         providers = cfg.setdefault("providers", {})
@@ -758,7 +871,7 @@ def apply_hub_settings(
             model_block = {}
             cfg["model"] = model_block
 
-        chosen_content = (content_model or "").strip() or str(model_block.get("default") or "").strip()
+        chosen_content = (content_model or "").strip() or str(prov_block.get("model") or model_block.get("default") or "").strip()
         model_block["provider"] = canonical_provider
         if chosen_content:
             model_block["default"] = chosen_content
@@ -827,6 +940,7 @@ def apply_hub_settings(
         cg_block["new_image_models"] = []
 
         _save_config_dict(cfg)
+        _normalize_ui_preferences_visible_models(canonical_provider, chosen_content)
 
     _clear_hermes_model_caches()
 

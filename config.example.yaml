@@ -1,6 +1,7 @@
-# Example Hermes Configuration Snippet for `custom-gateway-hub`
-# Copy relevant sections into `$HERMES_HOME/config.yaml` and store your real API key
-# in `$HERMES_HOME/.env` as `HERMES_CUSTOM_CUSTOM_GATEWAY_API_KEY=sk-...`
+# Example Hermes Configuration Reference for `custom-gateway-hub` (v1.1.0)
+# NOTE: Starting in v1.1.0, you DO NOT need to edit `$HERMES_HOME/config.yaml` or `.env` manually!
+# Simply open Hermes Desktop -> `Gateway Models`, paste your Base URL + API Key, click
+# `Check Connection & Tải Model mới`, and click `Lưu & Áp dụng ngay` — all sections below are generated automatically.
 
 model:
   provider: custom:custom-gateway

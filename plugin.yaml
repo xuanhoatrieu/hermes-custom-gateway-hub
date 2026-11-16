@@ -1,0 +1,7 @@
+name: custom-gateway-hub
+version: 1.1.0
+kind: backend
+description: "Custom Gateway Model Hub — unified backend + Desktop UI plugin for zero-touch Custom Endpoint setup, live /v1/models discovery, and separate Content vs Image Generation model selection."
+author: "TrieuHoa (xuanhoatrieu)"
+config_keys:
+  - image_gen.custom_gateway

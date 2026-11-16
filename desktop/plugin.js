@@ -1,11 +1,13 @@
 /**
- * Custom Gateway Hub — Hermes Desktop Runtime Plugin
- * Location: <HERMES_HOME>/desktop-plugins/custom-gateway-hub/plugin.js
+ * Custom Gateway Hub — Hermes Desktop Unified Runtime Plugin (v1.1.0)
+ * Package path: <HERMES_HOME>/plugins/custom-gateway-hub/desktop/plugin.js
+ * Materialized path: <HERMES_HOME>/desktop-plugins/custom-gateway-hub/plugin.js
  *
- * Update-safe user-space plugin:
+ * Update-safe user-space plugin with Zero-Touch Fresh-PC Setup:
+ *  - Auto-expands Endpoint & API Key onboarding banner on brand-new machines (no manual .env / config.yaml edits)
  *  - Auto-loads or manually probes `{base_url}/models` ("Check Connection & Tải Model mới")
  *  - Separates Content/Chat models vs Image Generation models automatically
- *  - Lets the user pick & apply Content Model + Image Model + PPT-Master sync in one click
+ *  - Auto-configures Proxy HTTP 502 image_generate guard + PPT-Master .env sync in one click
  *  - Syncs live chat session + composer model menu immediately
  */
 
@@ -57,7 +59,11 @@ const MESSAGES = {
     savedLabel: 'Đã đồng bộ',
     endpointConfig: 'Cấu hình Endpoint & API Key',
     autoCheckLabel: 'Tự động tải model mới khi mở trang',
+    proxyHintLabel: 'Chống lỗi Proxy HTTP 502 khi tạo ảnh (image_generate)',
     pptSyncLabel: 'Đồng bộ Model Ảnh sang PPT-Master (.env)',
+    onboardingTitle: 'Thiết lập nhanh lần đầu trên máy mới (không cần sửa file .env / config.yaml)',
+    onboardingSteps:
+      '1) Nhập Base URL (/v1) và API Key bên dưới → 2) Nhấn "Check Connection & Tải Model mới" → 3) Chọn Model Nội dung & Model Ảnh rồi bấm "Lưu & Áp dụng ngay".',
     contentCardTitle: 'Model Sinh Nội Dung (Chat / Reasoning)',
     contentCardSub: 'Dùng cho hội thoại chính, lập trình, viết kịch bản và suy luận',
     imageCardTitle: 'Model Tạo Ảnh (Image Generation)',
@@ -90,7 +96,11 @@ const MESSAGES = {
     savedLabel: 'Đã đồng bộ',
     endpointConfig: 'Cấu hình Endpoint & API Key',
     autoCheckLabel: 'Tự động tải model mới khi mở trang',
+    proxyHintLabel: 'Chống lỗi Proxy HTTP 502 khi tạo ảnh (image_generate)',
     pptSyncLabel: 'Đồng bộ Model Ảnh sang PPT-Master (.env)',
+    onboardingTitle: 'Thiết lập nhanh lần đầu trên máy mới (không cần sửa file .env / config.yaml)',
+    onboardingSteps:
+      '1) Nhập Base URL (/v1) và API Key bên dưới → 2) Nhấn "Check Connection & Tải Model mới" → 3) Chọn Model Nội dung & Model Ảnh rồi bấm "Lưu & Áp dụng ngay".',
     contentCardTitle: 'Model Sinh Nội Dung (Chat / Reasoning)',
     contentCardSub: 'Dùng cho hội thoại chính, lập trình, viết kịch bản và suy luận',
     imageCardTitle: 'Model Tạo Ảnh (Image Generation)',
@@ -443,6 +453,7 @@ function GatewayHubPage({ ctx, embedded = false }) {
   const [draftBaseUrl, setDraftBaseUrl] = useState('')
   const [draftApiMode, setDraftApiMode] = useState('chat_completions')
   const [draftApiKey, setDraftApiKey] = useState('')
+  const [ensureProxyHint, setEnsureProxyHint] = useState(true)
   const [syncPptMaster, setSyncPptMaster] = useState(true)
   const [lastProbeBanner, setLastProbeBanner] = useState(null)
 
@@ -464,6 +475,10 @@ function GatewayHubPage({ ctx, embedded = false }) {
       setDraftImageModel(data.active_image_model || '')
       setDraftBaseUrl(data.base_url || '')
       setDraftApiMode(data.api_mode || 'chat_completions')
+      setEnsureProxyHint(data.needs_setup ? true : Boolean(data.proxy_image_hint_enabled))
+      if (data.needs_setup) {
+        setShowEndpointForm(true)
+      }
       if (data.ppt_master && data.ppt_master.exists) {
         setSyncPptMaster(true)
       }
@@ -517,6 +532,17 @@ function GatewayHubPage({ ctx, embedded = false }) {
       if (res.resolved_base_url) {
         setDraftBaseUrl(res.resolved_base_url)
       }
+      if (res.has_api_key) {
+        setDraftApiKey('')
+      }
+      if (!draftContentModel && Array.isArray(res.chat_models) && res.chat_models.length > 0) {
+        setDraftContentModel(res.active_content_model || res.chat_models[0].id)
+      }
+      if (!draftImageModel && Array.isArray(res.image_models) && res.image_models.length > 0) {
+        const preferredImg =
+          res.image_models.find(m => String(m.id || '').startsWith('gpt-image')) || res.image_models[0]
+        setDraftImageModel(res.active_image_model || preferredImg.id)
+      }
 
       qc.setQueryData([...QUERY_KEY, activeProfile], res)
       await queryClient.invalidateQueries({ queryKey: ['model-options'] }).catch(() => undefined)
@@ -534,9 +560,9 @@ function GatewayHubPage({ ctx, embedded = false }) {
     }
   })
 
-  // Auto-check on open when enabled (with 60s cooldown so switching tabs is instant)
+  // Auto-check on open when enabled and already configured (skip when base_url is empty on fresh PC)
   useEffect(() => {
-    if (!data || !autoCheck || checkMutation.isPending) {
+    if (!data || !data.base_url || !autoCheck || checkMutation.isPending) {
       return
     }
     const now = Date.now()
@@ -545,7 +571,7 @@ function GatewayHubPage({ ctx, embedded = false }) {
     }
     lastAutoCheckAt = now
     checkMutation.mutate({ silent: true })
-  }, [Boolean(data), autoCheck])
+  }, [Boolean(data && data.base_url), autoCheck])
 
   const applyMutation = useMutation({
     mutationFn: () =>
@@ -557,12 +583,16 @@ function GatewayHubPage({ ctx, embedded = false }) {
           base_url: draftBaseUrl.trim() || undefined,
           api_mode: draftApiMode || undefined,
           api_key: draftApiKey.trim() || undefined,
-          sync_ppt_master: syncPptMaster
+          sync_ppt_master: syncPptMaster,
+          ensure_proxy_image_hint: ensureProxyHint
         },
         timeoutMs: 25_000
       }),
     onSuccess: async res => {
       setDraftApiKey('')
+      if (!res.needs_setup) {
+        setShowEndpointForm(false)
+      }
       qc.setQueryData([...QUERY_KEY, activeProfile], res)
       await syncLiveDesktopModel(res.active_content_model, res.canonical_provider)
       haptic('tap')
@@ -601,11 +631,13 @@ function GatewayHubPage({ ctx, embedded = false }) {
 
   const hasUnsavedChanges = Boolean(
     data &&
-      ((draftContentModel && draftContentModel !== data.active_content_model) ||
+      (data.needs_setup ||
+        (draftContentModel && draftContentModel !== data.active_content_model) ||
         (draftImageModel && draftImageModel !== data.active_image_model) ||
         (draftBaseUrl && draftBaseUrl.trim() !== (data.base_url || '').trim()) ||
         (draftApiMode && draftApiMode !== data.api_mode) ||
         Boolean(draftApiKey.trim()) ||
+        ensureProxyHint !== Boolean(data.proxy_image_hint_enabled) ||
         (syncPptMaster && data.ppt_master?.exists && !data.ppt_master?.synced))
   )
 
@@ -686,6 +718,11 @@ function GatewayHubPage({ ctx, embedded = false }) {
                           className: 'font-mono text-[0.6875rem]',
                           children: data?.provider_slug || 'custom-gateway'
                         }),
+                        jsx(Badge, {
+                          variant: 'outline',
+                          className: 'font-mono text-[0.625rem]',
+                          children: `v${data?.version || '1.1.0'}`
+                        }),
                         (lastProbeBanner?.latencyMs || data?.last_latency_ms)
                           ? jsx(Badge, {
                               variant: 'outline',
@@ -728,7 +765,7 @@ function GatewayHubPage({ ctx, embedded = false }) {
                   className: 'flex flex-wrap items-center gap-2',
                   children: [
                     jsx(Button, {
-                      variant: 'outline',
+                      variant: showEndpointForm ? 'secondary' : 'outline',
                       size: 'sm',
                       onClick: () => setShowEndpointForm(v => !v),
                       children: jsxs('span', {
@@ -766,6 +803,34 @@ function GatewayHubPage({ ctx, embedded = false }) {
               ]
             }),
 
+            // First-run onboarding guide banner on fresh PCs (when Base URL or API Key is not set yet)
+            data?.needs_setup
+              ? jsxs('div', {
+                  className:
+                    'flex items-start gap-2.5 rounded-lg border border-primary/35 bg-primary/10 px-3 py-2.5 text-xs',
+                  children: [
+                    jsx(Codicon, {
+                      name: 'sparkle',
+                      size: 15,
+                      className: 'mt-0.5 shrink-0 text-primary'
+                    }),
+                    jsxs('div', {
+                      className: 'flex flex-col gap-0.5',
+                      children: [
+                        jsx('span', {
+                          className: 'font-semibold text-foreground',
+                          children: t('onboardingTitle')
+                        }),
+                        jsx('span', {
+                          className: 'text-(--ui-text-secondary)',
+                          children: t('onboardingSteps')
+                        })
+                      ]
+                    })
+                  ]
+                })
+              : null,
+
             // Probe status banner
             lastProbeBanner
               ? jsxs('div', {
@@ -796,7 +861,7 @@ function GatewayHubPage({ ctx, embedded = false }) {
                 })
               : null,
 
-            // Collapsible Endpoint & API Key editor
+            // Collapsible Endpoint & API Key editor (auto-expanded when needs_setup is true)
             showEndpointForm
               ? jsxs('div', {
                   className:
@@ -858,7 +923,9 @@ function GatewayHubPage({ ctx, embedded = false }) {
                           type: 'password',
                           value: draftApiKey,
                           onChange: e => setDraftApiKey(e.target.value),
-                          placeholder: 'Để trống nếu giữ nguyên API key hiện tại...',
+                          placeholder: data?.has_api_key
+                            ? 'Để trống nếu giữ nguyên API key hiện tại...'
+                            : 'Nhập sk-... của Custom Gateway...',
                           className: 'h-8 font-mono text-xs'
                         })
                       ]
@@ -884,6 +951,17 @@ function GatewayHubPage({ ctx, embedded = false }) {
                           onCheckedChange: toggleAutoCheck
                         }),
                         jsx('span', { children: t('autoCheckLabel') })
+                      ]
+                    }),
+                    jsxs('label', {
+                      className: 'flex cursor-pointer items-center gap-2 text-xs text-(--ui-text-secondary)',
+                      children: [
+                        jsx(Switch, {
+                          size: 'xs',
+                          checked: ensureProxyHint,
+                          onCheckedChange: setEnsureProxyHint
+                        }),
+                        jsx('span', { children: t('proxyHintLabel') })
                       ]
                     }),
                     data?.ppt_master?.exists

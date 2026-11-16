@@ -1,9 +1,11 @@
-"""FastAPI routes for `custom-gateway-hub`, mounted at `/api/plugins/custom-gateway-hub/`.
+"""FastAPI routes for `custom-gateway-hub` (v1.1.0), mounted at `/api/plugins/custom-gateway-hub/`.
 
 Endpoints:
-  - `GET /state`  — Current endpoint config, active Content & Image models, cached model lists, ppt-master sync status.
+  - `GET /state`  — Current endpoint config, first-run `needs_setup` flag, active Content & Image models,
+                    cached model lists, proxy HTTP 502 guard state, and ppt-master sync status.
   - `POST /check` — Live `/v1/models` connection test + automatic Chat vs Image model discovery & persistence.
-  - `POST /apply` — Save selected Content Model, Image Model, optional Endpoint edits, and `ppt-master/.env` sync.
+  - `POST /apply` — Zero-touch save for Content Model, Image Model, Endpoint/API Key, Proxy HTTP 502 guard,
+                    Desktop model visibility normalization, and `ppt-master/.env` sync.
 """
 
 from __future__ import annotations
@@ -63,6 +65,7 @@ class ApplySettingsPayload(BaseModel):
     api_mode: Optional[str] = None
     api_key: Optional[str] = None
     sync_ppt_master: bool = True
+    ensure_proxy_image_hint: Optional[bool] = True
 
 
 @router.get("/state")
@@ -110,6 +113,7 @@ async def apply_settings(body: ApplySettingsPayload) -> dict[str, Any]:
             api_mode=body.api_mode,
             api_key=body.api_key,
             sync_ppt_master=body.sync_ppt_master,
+            ensure_proxy_image_hint=body.ensure_proxy_image_hint,
         )
     )
     _emit_gateway_event(
